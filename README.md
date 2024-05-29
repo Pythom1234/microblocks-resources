@@ -4,4 +4,4 @@
 > 
 > *from [microblocks.fun](http://microblocks.fun)*
 ### What is this repository for?
-There are some 
+There are some projects and translations.

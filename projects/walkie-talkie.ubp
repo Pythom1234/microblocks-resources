@@ -1,0 +1,218 @@
+module main
+author unknown
+version 1 0 
+description ''
+variables 'send buffer' 'rcv buffer' 
+
+  spec ' ' 'play recieved data' 'play  _' 'auto' '10'
+  spec 'r' 'receive' 'receive'
+  spec 'r' 'record' 'record'
+  spec ' ' 'transmit' 'transmit _' 'auto' '10'
+
+to 'play recieved data' count {
+  for i count {
+    analogWriteOp 27 ((3 * (at i (v 'rcv buffer'))) + 256)
+    waitMicros 115
+  }
+}
+
+to receive {
+  local 'next' 1
+  local 'packet' (newList 32)
+  waitUntil ('[radio:packetReceive]' packet)
+  forever {
+    if ((at 2 packet) == 123) {
+      for i 30 {
+        atPut next (v 'rcv buffer') (at (i + 2) packet)
+        next += 1
+      }
+      if ((next + 30) > (size (v 'rcv buffer'))) {
+        return next
+      }
+      resetTimer
+    }
+    repeatUntil ('[radio:packetReceive]' packet) {
+      if ((timer) > 100) {return next}
+    }
+  }
+}
+
+to record {
+  digitalWriteOp 28 true
+  for i (size (v 'send buffer')) {
+    local 'sample' ((('[sensors:microphone]') / 3) + 128)
+    sample = (maximum 0 (minimum sample 255))
+    atPut i (v 'send buffer') sample
+    if (not (buttonA)) {
+      digitalWriteOp 28 false
+      return i
+    }
+    waitMicros 33
+  }
+  digitalWriteOp 28 false
+  return (size (v 'send buffer'))
+}
+
+to transmit count {
+  local 'packet' (newList 32)
+  atPut 1 packet 32
+  atPut 2 packet 123
+  count = (minimum count (size (v 'send buffer')))
+  local 'next' 1
+  repeatUntil ((next + 30) > count) {
+    for i 30 {
+      atPut (i + 2) packet (at next (v 'send buffer'))
+      next += 1
+    }
+    '[radio:packetSend]' packet
+  }
+}
+
+script 60 40 {
+whenStarted
+'send buffer' = ('[data:newByteArray]' 45000)
+'rcv buffer' = ('[data:newByteArray]' 45000)
+forever {
+  atPut 'all' (v 'rcv buffer') 0
+  local 'sample count' (receive)
+  'play recieved data' (v 'sample count')
+}
+}
+
+script 489 40 {
+whenButtonPressed 'A'
+local 'sample count' (record)
+setUserLED true
+transmit (v 'sample count')
+setUserLED false
+}
+
+script 60 286 {
+to 'play recieved data' {}
+}
+
+script 535 286 {
+to transmit {}
+}
+
+script 60 773 {
+to record {}
+}
+
+script 477 773 {
+to receive {}
+}
+
+
+module Microphone Input
+author MicroBlocks
+version 1 3 
+description 'Microphone, loudness, and clap counting support for boards with built in microphones. The microphone block usually reports values between -512 and 511, with zero for silence. However, very loud sounds may exceed that range on some boards. On the micro:bit v2, the microphone must be turned on before use.'
+variables _clapThreshold _loudnessSamples 
+
+  spec 'r' '[sensors:microphone]' 'microphone'
+  spec ' ' 'turnOnMicrophone' 'turn on microphone'
+  spec 'r' 'loudness' 'loudness'
+  spec 'r' 'clapCount' 'clap count'
+  spec ' ' 'setClapThreshold' 'set clap threshold _' 'auto' 200
+  spec 'r' 'guessClapThreshold' 'estimate clap threshold'
+  spec ' ' '_loudnessLoop' '_loudnessLoop'
+
+to '_loudnessLoop' {
+  comment 'Sample microphone at ~2000 samples/sec, keeping the most recent N samples.'
+  turnOnMicrophone
+  waitMillis 20
+  forever {
+    for i (size _loudnessSamples) {
+      atPut i _loudnessSamples ('[sensors:microphone]')
+      waitMicros 500
+    }
+  }
+}
+
+to clapCount {
+  comment 'Count the number of claps in a sequence.'
+  if (_clapThreshold == 0) {
+    _clapThreshold = 150
+  }
+  waitUntil ((loudness) > _clapThreshold)
+  local 'count' 1
+  forever {
+    waitUntil ((loudness) < ((3 * _clapThreshold) / 4))
+    resetTimer
+    repeatUntil ((loudness) > _clapThreshold) {
+      comment 'This loop awaits either the next clap or for a pause, indicating that the claps have ended.'
+      if ((timer) > 700) {
+        comment 'No clap for a while, return the count.'
+        return count
+      }
+    }
+    count += 1
+  }
+}
+
+to guessClapThreshold {
+  comment 'Sample the loudness for three seconds and set
+_clapThreshold to 130% of the maxium.'
+  local 'maxLoudness' 0
+  resetTimer
+  repeatUntil ((timer) > 3000) {
+    maxLoudness = (maximum maxLoudness (loudness))
+  }
+  return ((13 * maxLoudness) / 10)
+}
+
+to loudness {
+  if (_loudnessSamples == 0) {
+    comment 'Initialize _loudnessSamples and start sampling.'
+    _loudnessSamples = (newList 50)
+    sendBroadcast '_loudnessLoop'
+  }
+  local 'low' 10000
+  local 'high' -10000
+  for n _loudnessSamples {
+    low = (minimum low n)
+    high = (maximum high n)
+  }
+  return (high - low)
+}
+
+to setClapThreshold n {
+  _clapThreshold = n
+}
+
+to turnOnMicrophone {
+  if ('micro:bit v2' == (boardType)) {
+    comment 'Turn on the microphone and
+wait for it to settle down.'
+    digitalWriteOp 28 true
+    waitMillis 50
+  }
+}
+
+
+module 'Radio Primitives' Comm
+author MicroBlocks
+version 1 1 
+tags radio communication messaging network 
+description 'Low level BBC micro:bit radio primitives. You are probably looking for the Radio library in the folder above.
+
+Messages to send and receive strings, numbers, and pairs use the same packet format as MakeCode and can be used to communicate with devices running MakeCode.
+
+The packetSend/packetReceive primitives provide access to raw 32-byte radio packets so you can create your own protocol. The first byte gives the message length in bytes not counting the length byte; max is 31. The next byte is "1" for MakeCode packets; use anything but "1" for you own protocol and then it is up to you to define the format for the rest of the packet. See https://ukbaz.github.io/howto/ubit_radio.html.
+'
+
+  spec ' ' '[radio:sendInteger]' 'radio send number _' 'num' 123
+  spec ' ' '[radio:sendString]' 'radio send string _' 'str' 'Hello!'
+  spec ' ' '[radio:sendPair]' 'radio send pair _ = _' 'str num' 'light' 10
+  spec 'r' '[radio:messageReceived]' 'radio message received?'
+  spec 'r' '[radio:receivedInteger]' 'radio last number'
+  spec 'r' '[radio:receivedString]' 'radio last string'
+  spec 'r' '[radio:receivedMessageType]' 'radio last message type'
+  spec ' ' '[radio:setGroup]' 'radio set group _ (0-255)' 'num' 0
+  spec ' ' '[radio:setChannel]' 'radio set channel (0-83) _' 'num' 7
+  spec ' ' '[radio:setPower]' 'radio set power (0-7) _' 'num' 4
+  spec 'r' '[radio:signalStrength]' 'radio last signal strength'
+  spec 'r' '[radio:packetReceive]' 'radio receive packet _' 'str'
+  spec ' ' '[radio:packetSend]' 'radio send packet _' 'str'
+  spec ' ' '[radio:disableRadio]' 'disable radio'
